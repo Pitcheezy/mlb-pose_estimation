@@ -1,0 +1,12 @@
+names:
+- pitcher
+nc: 1
+roboflow:
+  license: CC BY 4.0
+  project: pitcher-pointing-wcoix
+  url: https://universe.roboflow.com/pitcheezy/pitcher-pointing-wcoix/dataset/1
+  version: 1
+  workspace: pitcheezy
+test: ../test/images
+train: ../train/images
+val: ../valid/images
