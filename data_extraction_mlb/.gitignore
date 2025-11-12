@@ -48,17 +48,59 @@ Thumbs.db
 
 # Project specific
 # 대용량 데이터 파일들은 Git에 포함하지 않음
-data/raw/videos/ohtani_videos/
-data/processed/dataset/images/
-data/processed/dataset/for_labeling/
-results/analyzed_videos/
+data/raw/videos/
+data/processed/dataset/
+results/
 models/pitch_classifier/*.h5
+models/pitcher_detector/runs/detect/train/weights/*.pt
+
+# 환경 설정 및 민감한 정보
+.env
+.env.*
+config.json
+secrets.json
+credentials.json
+
+# 데이터베이스 파일
+*.db
+*.sqlite
+*.sqlite3
 
 # 로그 파일
 *.log
 logs/
+tensorboard/
 
-# 임시 파일
+# 임시 파일 및 캐시
 temp/
 tmp/
 *.tmp
+.cache/
+.pytest_cache/
+*.egg-info/
+
+# Jupyter Notebook 출력
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# 모델 체크포인트 (대용량)
+checkpoints/
+*.pth
+*.pkl
+*.joblib
+
+# IDE 추가 설정
+.vscode/settings.json
+.idea/workspace.xml
+*.sublime-project
+*.sublime-workspace
+
+# 운영체제별 추가 파일
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
