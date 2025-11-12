@@ -6,15 +6,27 @@ import os
 
 def calculate_angle(a, b, c):
     """세 점 a, b, c가 주어졌을 때 점 b(팔꿈치)에서의 각도를 계산합니다."""
-    a = np.array(a) # 어깨
-    b = np.array(b) # 팔꿈치
-    c = np.array(c) # 손목
+    # tensor를 numpy로 변환 (GPU tensor인 경우)
+    if hasattr(a, 'cpu'):
+        a = a.cpu().numpy()
+    if hasattr(b, 'cpu'):
+        b = b.cpu().numpy()
+    if hasattr(c, 'cpu'):
+        c = c.cpu().numpy()
 
-    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
-    angle = np.abs(radians * 180.0 / np.pi)
+    # numpy array로 변환
+    a = np.asarray(a, dtype=np.float32) # 어깨
+    b = np.asarray(b, dtype=np.float32) # 팔꿈치
+    c = np.asarray(c, dtype=np.float32) # 손목
 
-    if angle > 180.0:
-        angle = 360 - angle
+    # 벡터 계산
+    ba = a - b  # 어깨에서 팔꿈치로의 벡터
+    bc = c - b  # 손목에서 팔꿈치로의 벡터
+
+    # 코사인 법칙을 사용한 각도 계산
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    cosine_angle = np.clip(cosine_angle, -1, 1)  # 범위 제한
+    angle = np.arccos(cosine_angle) * 180.0 / np.pi
 
     return angle
 
@@ -54,8 +66,6 @@ except Exception as e:
     exit()
 
 # MediaPipe 대신 간단한 객체 탐지 기반 분석으로 변경
-
-import os
 
 # 분석 결과 저장 디렉토리 생성
 if not os.path.exists(OUTPUT_DIR):
@@ -113,6 +123,7 @@ def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_di
             break
 
         frame_count += 1
+
         output_frame = frame.copy()
 
         # --- 1단계: 투수 탐지 ---
@@ -148,24 +159,49 @@ def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_di
                         right_elbow = kpts[8]
                         right_wrist = kpts[10]
 
-                        if right_shoulder[2] > 0.5 and right_elbow[2] > 0.5 and right_wrist[2] > 0.5:
-                            # (A) 각도 계산
-                            angle = calculate_angle(right_shoulder[:2], right_elbow[:2], right_wrist[:2])
-                            analyzed_angles.append(angle) # 평균 계산용 저장
+                        # 신뢰도 임계값 설정
+                        confidence_threshold = 0.3  # 키포인트 검출 임계값
 
-                            elbow_pos_crop = (int(right_elbow[0]), int(right_elbow[1]))
-                            cv2.putText(annotated_crop, f"{angle:.1f}", (elbow_pos_crop[0] + 5, elbow_pos_crop[1]),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                        # 키포인트가 검출되었는지 확인
+                        keypoints_detected = (right_shoulder[2] > confidence_threshold and
+                                            right_elbow[2] > confidence_threshold and
+                                            right_wrist[2] > confidence_threshold)
+
+                        if keypoints_detected:
+                            # (A) 각도 계산
+                            try:
+                                angle = calculate_angle(right_shoulder[:2], right_elbow[:2], right_wrist[:2])
+                                analyzed_angles.append(angle) # 평균 계산용 저장
+
+                                elbow_pos_crop = (int(right_elbow[0]), int(right_elbow[1]))
+                                cv2.putText(annotated_crop, f"{angle:.1f}", (elbow_pos_crop[0] + 5, elbow_pos_crop[1]),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                            except Exception as e:
+                                print(f"   [프레임 {frame_count}] 각도 계산 에러: {e}")
+                                continue
 
                             # (B) 릴리스 포인트(최대 손목 속도) 계산
-                            current_wrist_pos = right_wrist[:2].cpu().numpy()
-                            if prev_wrist_pos is not None:
-                                # 유클리드 거리로 속도 근사
-                                velocity = np.linalg.norm(current_wrist_pos - prev_wrist_pos)
-                                if velocity > max_wrist_velocity:
-                                    max_wrist_velocity = velocity
-                                    angle_at_release = angle
-                                    frame_at_release = frame_count
+                            # tensor를 numpy로 변환
+                            if hasattr(right_wrist[:2], 'cpu'):
+                                current_wrist_pos = right_wrist[:2].cpu().numpy()
+                            else:
+                                current_wrist_pos = np.asarray(right_wrist[:2])
+
+                            # 릴리스 포인트 추적을 위한 초기화
+                            if prev_wrist_pos is None:
+                                prev_wrist_pos = current_wrist_pos
+                                continue
+
+                            # 유클리드 거리로 속도 근사 (픽셀 단위)
+                            velocity = np.linalg.norm(current_wrist_pos - prev_wrist_pos)
+
+                            # 최대 속도 업데이트 및 릴리스 포인트 감지
+                            if velocity > max_wrist_velocity:
+                                max_wrist_velocity = velocity
+                                angle_at_release = angle
+                                frame_at_release = frame_count
+
                             prev_wrist_pos = current_wrist_pos
 
                     # 뼈대와 각도가 그려진 crop을 원본 프레임에 다시 붙여넣기
