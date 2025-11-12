@@ -49,8 +49,7 @@ try:
     pitcher_detector = YOLO(YOLO_MODEL_PATH)
     pose_estimator = YOLO('yolov8n-pose.pt')
 except Exception as e:
-    print(f"오류: YOLO 모델들을 불러오는 데 실패했습니다.")
-    print(f"YOLO_MODEL_PATH: {YOLO_MODEL_PATH}")
+    print(f"오류: YOLO 모델을 불러오는 데 실패했습니다. 경로를 확인하세요: {YOLO_MODEL_PATH}")
     print(f"상세 오류: {e}")
     exit()
 
@@ -107,7 +106,6 @@ def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_di
     frame_at_release = -1
 
     analyzed_angles = [] # 프레임별 각도 저장 (평균 계산용)
-    # --- (여기까지 추가) ---
 
     while cap.isOpened():
         ret, frame = cap.read()
