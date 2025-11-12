@@ -50,7 +50,7 @@ try:
     pose_estimator = YOLO('yolov8n-pose.pt')
 except Exception as e:
     print(f"오류: YOLO 모델들을 불러오는 데 실패했습니다.")
-    print(f"탐지 모델 경로: {YOLO_MODEL_PATH}")
+    print(f"YOLO_MODEL_PATH: {YOLO_MODEL_PATH}")
     print(f"상세 오류: {e}")
     exit()
 
@@ -64,7 +64,7 @@ if not os.path.exists(OUTPUT_DIR):
     print(f"📁 분석 결과 저장 디렉토리 생성: {OUTPUT_DIR}")
 
 def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_dir):
-    """단일 영상을 2단계 분석하여 자세 각도와 릴리스 포인트를 계산합니다."""
+    """단일 영상을 분석하여 결과를 파일로 저장합니다."""
     print(f"\n🎬 분석 시작: {video_path}")
 
     cap = cv2.VideoCapture(video_path)
@@ -84,9 +84,9 @@ def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_di
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     print(f"📹 출력 파일: {output_path}")
-    print(f"📊 비디오 정보: {fps}fps, {width}x{height}")
 
     # --- ★ 1. 키(Key) 추출 및 분석 변수 초기화 ★ ---
+
     # 파일명에서 키(Key) 파싱 (예: 2018-04-01_529450_atbat_13_pitch_1_ST...)
     try:
         parts = os.path.basename(video_path).split('_')
@@ -107,6 +107,7 @@ def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_di
     frame_at_release = -1
 
     analyzed_angles = [] # 프레임별 각도 저장 (평균 계산용)
+    # --- (여기까지 추가) ---
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -117,6 +118,7 @@ def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_di
         output_frame = frame.copy()
 
         # --- 1단계: 투수 탐지 ---
+
         detect_results = pitcher_detector(frame, verbose=False)
 
         if detect_results and detect_results[0].boxes:
@@ -129,6 +131,7 @@ def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_di
                 cv2.rectangle(output_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
                 # --- 2단계: 자세 추정 (Crop) ---
+
                 pad = 20
                 crop_x1 = max(0, x1 - pad); crop_y1 = max(0, y1 - pad)
                 crop_x2 = min(frame.shape[1], x2 + pad); crop_y2 = min(frame.shape[0], y2 + pad)
@@ -180,11 +183,8 @@ def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_di
         cv2.putText(output_frame, f"Frame: {frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
         out.write(output_frame)
 
-        # 진행 상황 출력 (50프레임마다)
-        if frame_count % 50 == 0:
-            print(f"⏳ 처리 중: {frame_count} 프레임 완료, 탐지: {detection_count}")
-
     # --- ★ 2. 루프 종료 후 결과 반환 ★ ---
+
     cap.release()
     out.release()
 
@@ -231,6 +231,7 @@ for i, video_path in enumerate(VIDEO_PATHS, 1):
         print(f"❌ {video_path} 분석 실패")
 
 # --- 최종 결과 요약 및 CSV 저장 ---
+
 print("\n" + "=" * 60)
 print("🎉 모든 영상 분석 완료!")
 print("=" * 60)
