@@ -1,7 +1,22 @@
 import cv2
 import numpy as np
+import pandas as pd
 from ultralytics import YOLO
 import os
+
+def calculate_angle(a, b, c):
+    """세 점 a, b, c가 주어졌을 때 점 b(팔꿈치)에서의 각도를 계산합니다."""
+    a = np.array(a) # 어깨
+    b = np.array(b) # 팔꿈치
+    c = np.array(c) # 손목
+
+    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
+    angle = np.abs(radians * 180.0 / np.pi)
+
+    if angle > 180.0:
+        angle = 360 - angle
+
+    return angle
 
 # --- 1. 사용할 모델 및 영상 경로 설정 ---
 
@@ -31,9 +46,11 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'results', 'analyzed_videos')
 
 # --- 필요한 도구들 초기화 ---
 try:
-    yolo_model = YOLO(YOLO_MODEL_PATH)
+    pitcher_detector = YOLO(YOLO_MODEL_PATH)
+    pose_estimator = YOLO('yolov8n-pose.pt')
 except Exception as e:
-    print(f"오류: YOLO 모델을 불러오는 데 실패했습니다. 경로를 확인하세요: {YOLO_MODEL_PATH}")
+    print(f"오류: YOLO 모델들을 불러오는 데 실패했습니다.")
+    print(f"탐지 모델 경로: {YOLO_MODEL_PATH}")
     print(f"상세 오류: {e}")
     exit()
 
@@ -46,8 +63,8 @@ if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
     print(f"📁 분석 결과 저장 디렉토리 생성: {OUTPUT_DIR}")
 
-def analyze_single_video(video_path, yolo_model, output_dir):
-    """단일 영상을 분석하여 결과를 파일로 저장합니다."""
+def analyze_single_video(video_path, pitcher_detector, pose_estimator, output_dir):
+    """단일 영상을 2단계 분석하여 자세 각도와 릴리스 포인트를 계산합니다."""
     print(f"\n🎬 분석 시작: {video_path}")
 
     cap = cv2.VideoCapture(video_path)
@@ -69,9 +86,27 @@ def analyze_single_video(video_path, yolo_model, output_dir):
     print(f"📹 출력 파일: {output_path}")
     print(f"📊 비디오 정보: {fps}fps, {width}x{height}")
 
-    # 프레임 카운터 및 탐지 통계
+    # --- ★ 1. 키(Key) 추출 및 분석 변수 초기화 ★ ---
+    # 파일명에서 키(Key) 파싱 (예: 2018-04-01_529450_atbat_13_pitch_1_ST...)
+    try:
+        parts = os.path.basename(video_path).split('_')
+        game_pk = int(parts[1])
+        at_bat_number = int(parts[3])
+        pitch_number = int(parts[5])
+    except Exception as e:
+        print(f"❌ 오류: 파일명에서 키를 파싱할 수 없습니다: {os.path.basename(video_path)} -> {e}")
+        return None # 이 비디오 분석 중단
+
     frame_count = 0
     detection_count = 0
+
+    # 릴리스 포인트 추적용 변수
+    prev_wrist_pos = None
+    max_wrist_velocity = -1
+    angle_at_release = -1
+    frame_at_release = -1
+
+    analyzed_angles = [] # 프레임별 각도 저장 (평균 계산용)
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -79,56 +114,101 @@ def analyze_single_video(video_path, yolo_model, output_dir):
             break
 
         frame_count += 1
+        output_frame = frame.copy()
 
-        # YOLO로 투수 탐지
-        results = yolo_model(frame, verbose=False)
+        # --- 1단계: 투수 탐지 ---
+        detect_results = pitcher_detector(frame, verbose=False)
 
-        if results and results[0].boxes:
-            # 모든 탐지된 객체에 대해 처리
-            for box in results[0].boxes:
-                if box.conf > 0.5:  # 신뢰도 50% 이상
-                    detection_count += 1
-                    xyxy = box.xyxy[0].cpu().numpy().astype(int)
-                    x1, y1, x2, y2 = xyxy
+        if detect_results and detect_results[0].boxes:
+            box = detect_results[0].boxes[0]
 
-                    # 탐지된 영역에 사각형 그리기
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            if box.conf > 0.5:
+                detection_count += 1 # (기존 코드에서 이동)
+                xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                x1, y1, x2, y2 = xyxy
+                cv2.rectangle(output_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                    # 신뢰도 표시
-                    confidence = box.conf.item() * 100
-                    cv2.putText(frame, f"Pitcher: {confidence:.1f}%", (x1, y1-10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                # --- 2단계: 자세 추정 (Crop) ---
+                pad = 20
+                crop_x1 = max(0, x1 - pad); crop_y1 = max(0, y1 - pad)
+                crop_x2 = min(frame.shape[1], x2 + pad); crop_y2 = min(frame.shape[0], y2 + pad)
+                pitcher_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
 
-        # 프레임 정보 표시
-        cv2.putText(frame, f"Frame: {frame_count}", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                if pitcher_crop.size == 0: continue
 
-        # 처리된 프레임을 출력 비디오에 저장
-        out.write(frame)
+                pose_results = pose_estimator(pitcher_crop, verbose=False)
+                annotated_crop = pose_results[0].plot() # 뼈대 그리기
+
+                try:
+                    if pose_results[0].keypoints and pose_results[0].keypoints.data.shape[1] == 17:
+                        kpts = pose_results[0].keypoints.data[0] # (17, 3)
+
+                        right_shoulder = kpts[6]
+                        right_elbow = kpts[8]
+                        right_wrist = kpts[10]
+
+                        if right_shoulder[2] > 0.5 and right_elbow[2] > 0.5 and right_wrist[2] > 0.5:
+                            # (A) 각도 계산
+                            angle = calculate_angle(right_shoulder[:2], right_elbow[:2], right_wrist[:2])
+                            analyzed_angles.append(angle) # 평균 계산용 저장
+
+                            elbow_pos_crop = (int(right_elbow[0]), int(right_elbow[1]))
+                            cv2.putText(annotated_crop, f"{angle:.1f}", (elbow_pos_crop[0] + 5, elbow_pos_crop[1]),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                            # (B) 릴리스 포인트(최대 손목 속도) 계산
+                            current_wrist_pos = right_wrist[:2].cpu().numpy()
+                            if prev_wrist_pos is not None:
+                                # 유클리드 거리로 속도 근사
+                                velocity = np.linalg.norm(current_wrist_pos - prev_wrist_pos)
+                                if velocity > max_wrist_velocity:
+                                    max_wrist_velocity = velocity
+                                    angle_at_release = angle
+                                    frame_at_release = frame_count
+                            prev_wrist_pos = current_wrist_pos
+
+                    # 뼈대와 각도가 그려진 crop을 원본 프레임에 다시 붙여넣기
+                    output_frame[crop_y1:crop_y2, crop_x1:crop_x2] = annotated_crop
+
+                except Exception as e:
+                    pass
+
+        # (시각화) 릴리스 프레임 표시
+        if frame_count == frame_at_release:
+            cv2.putText(output_frame, "RELEASE!", (50, 80), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (0, 0, 255), 2)
+
+        cv2.putText(output_frame, f"Frame: {frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        out.write(output_frame)
 
         # 진행 상황 출력 (50프레임마다)
         if frame_count % 50 == 0:
             print(f"⏳ 처리 중: {frame_count} 프레임 완료, 탐지: {detection_count}")
 
+    # --- ★ 2. 루프 종료 후 결과 반환 ★ ---
     cap.release()
     out.release()
 
-    detection_rate = (detection_count / frame_count) * 100 if frame_count > 0 else 0
+    avg_angle = np.mean(analyzed_angles) if analyzed_angles else -1
 
-    result = {
-        'video_path': video_path,
-        'output_path': output_path,
-        'total_frames': frame_count,
-        'detections': detection_count,
-        'detection_rate': detection_rate
+    # 최종 분석 결과를 딕셔너리로 반환
+    result_data = {
+        'game_pk': game_pk,
+        'at_bat_number': at_bat_number,
+        'pitch_number': pitch_number,
+        'calculated_release_angle': angle_at_release,
+        'calculated_avg_angle': avg_angle,
+        'release_frame': frame_at_release,
+        'max_wrist_velocity': max_wrist_velocity,
+        'output_video_path': output_path,
+        'detection_rate': (detection_count / frame_count) * 100 if frame_count > 0 else 0
     }
 
     print(f"✅ 분석 완료: {os.path.basename(video_path)}")
-    print(f"   📊 총 프레임: {frame_count}")
-    print(f"   🎯 투수 탐지: {detection_count}")
-    print(f"   📈 탐지율: {detection_rate:.1f}%")
+    print(f"   🔑 Keys: {game_pk}, {at_bat_number}, {pitch_number}")
+    print(f"   🚀 릴리스 각도: {angle_at_release:.2f} (at frame {frame_at_release})")
+    print(f"   📊 평균 각도: {avg_angle:.2f}")
 
-    return result
+    return result_data # 기존 result 딕셔너리 대신 이 딕셔너리를 반환
 
 # --- 여러 영상 배치 분석 시작 ---
 print(f"\n🚀 총 {len(VIDEO_PATHS)}개의 영상 분석을 시작합니다!")
@@ -142,7 +222,7 @@ for i, video_path in enumerate(VIDEO_PATHS, 1):
     print("-" * 50)
 
     # 각 영상 분석
-    result = analyze_single_video(video_path, yolo_model, OUTPUT_DIR)
+    result = analyze_single_video(video_path, pitcher_detector, pose_estimator, OUTPUT_DIR)
 
     if result:
         all_results.append(result)
@@ -150,27 +230,29 @@ for i, video_path in enumerate(VIDEO_PATHS, 1):
     else:
         print(f"❌ {video_path} 분석 실패")
 
-# --- 최종 결과 요약 ---
+# --- 최종 결과 요약 및 CSV 저장 ---
 print("\n" + "=" * 60)
 print("🎉 모든 영상 분석 완료!")
 print("=" * 60)
+
+successful_analyses = len(all_results)
 print(f"📊 분석한 영상 수: {len(VIDEO_PATHS)}개")
 print(f"✅ 성공한 분석: {successful_analyses}개")
 print(f"❌ 실패한 분석: {len(VIDEO_PATHS) - successful_analyses}개")
 
 if all_results:
-    total_frames = sum(r['total_frames'] for r in all_results)
-    total_detections = sum(r['detections'] for r in all_results)
-    avg_detection_rate = sum(r['detection_rate'] for r in all_results) / len(all_results)
+    # 결과를 DataFrame으로 변환
+    results_df = pd.DataFrame(all_results)
+
+    # CSV 파일로 저장
+    csv_output_path = os.path.join(PROJECT_ROOT, 'results', 'video_analysis_results.csv')
+    results_df.to_csv(csv_output_path, index=False, encoding='utf-8-sig')
 
     print("\n📈 전체 통계:")
-    print(f"   총 프레임 수: {total_frames}")
-    print(f"   총 탐지 수: {total_detections}")
-    print(f"   평균 탐지율: {avg_detection_rate:.1f}%")
+    print(f"   평균 릴리스 각도: {results_df['calculated_release_angle'].mean():.2f}")
+    print(f"   평균 탐지율: {results_df['detection_rate'].mean():.1f}%")
 
-    print("\n📁 생성된 분석 영상들:")
-    for result in all_results:
-        video_name = os.path.basename(result['output_path'])
-        print(f"   ✅ {video_name} (탐지율: {result['detection_rate']:.1f}%)")
-
-print(f"\n💾 모든 결과는 '{OUTPUT_DIR}' 폴더에 저장되었습니다!")
+    print(f"\n💾 ★★★ 분석 결과가 CSV 파일로 저장되었습니다! ★★★")
+    print(f"   {csv_output_path}")
+else:
+    print("\n분석에 성공한 데이터가 없습니다.")
